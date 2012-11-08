@@ -5,7 +5,7 @@
 package akka.cluster
 
 import akka.testkit.{ ImplicitSender, AkkaSpec }
-import akka.cluster.NodeMetrics.MetricValues._
+import akka.cluster.StandardMetrics.HeapMemory.Fields._
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricNumericConverter with ImplicitSender with MetricSpec

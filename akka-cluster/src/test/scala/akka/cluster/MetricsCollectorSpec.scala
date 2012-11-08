@@ -11,7 +11,9 @@ import scala.util.{ Success, Try, Failure }
 
 import akka.actor._
 import akka.testkit._
-import akka.cluster.NodeMetrics.MetricValues._
+import akka.cluster.StandardMetrics.HeapMemory.Fields._
+import akka.cluster.StandardMetrics.Cpu.Fields._
+import akka.cluster.StandardMetrics.NetworkIO.Fields._
 import org.scalatest.WordSpec
 import org.scalatest.matchers.MustMatchers
 
@@ -108,8 +110,9 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
       // systemLoadAverage is JMX when SIGAR not present, but
       // it's not present on all platforms
       val c = collector.asInstanceOf[JmxMetricsCollector]
-      c.heapUsed.isDefined must be(true)
-      c.heapCommitted.isDefined must be(true)
+      val heap = c.heapMemoryUsage
+      c.heapUsed(heap).isDefined must be(true)
+      c.heapCommitted(heap).isDefined must be(true)
       c.processors.isDefined must be(true)
     }
 

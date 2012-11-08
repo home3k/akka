@@ -8,8 +8,8 @@ import akka.testkit.AkkaSpec
 import akka.actor.Address
 import akka.actor.RootActorPath
 import akka.cluster.NodeMetrics
-import akka.cluster.NodeMetrics.MetricValues._
 import akka.cluster.Metric
+import akka.cluster.StandardMetrics.HeapMemory.Fields._
 import com.typesafe.config.ConfigFactory
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])

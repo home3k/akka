@@ -17,7 +17,7 @@ import akka.cluster.Cluster
 import akka.cluster.ClusterEvent.ClusterMetricsChanged
 import akka.cluster.ClusterEvent.CurrentClusterState
 import akka.cluster.NodeMetrics
-import akka.cluster.NodeMetrics.MetricValues
+import akka.cluster.StandardMetrics.HeapMemory
 import akka.dispatch.Dispatchers
 import akka.event.Logging
 import akka.routing.Broadcast
@@ -189,7 +189,7 @@ trait ClusterLoadBalancingRouterLike { this: RouterConfig ⇒
 
 /**
  * MetricsSelector that uses the heap metrics.
- * Low heap capacity => lower weight.
+ * Low heap capacity => small weight.
  */
 @SerialVersionUID(1L)
 case object HeapMetricsSelector extends MetricsSelector {
@@ -199,14 +199,14 @@ case object HeapMetricsSelector extends MetricsSelector {
   def getInstance = this
 
   override def capacity(nodeMetrics: Set[NodeMetrics]): Map[Address, Double] = {
-    nodeMetrics.map { n ⇒
-      val (used, committed, max) = MetricValues.unapply(n.heapMemory)
-      val capacity = max match {
-        case None    ⇒ (committed - used).toDouble / committed
-        case Some(m) ⇒ (m - used).toDouble / m
-      }
-      (n.address, capacity)
-    }.toMap
+    nodeMetrics collect {
+      case HeapMemory(heap) ⇒
+        val capacity = heap.max match {
+          case None    ⇒ (heap.committed - heap.used).toDouble / heap.committed
+          case Some(m) ⇒ (m - heap.used).toDouble / m
+        }
+        (heap.address, capacity)
+    } toMap
   }
 }
 

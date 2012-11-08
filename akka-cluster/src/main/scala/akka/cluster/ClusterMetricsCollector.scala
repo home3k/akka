@@ -9,13 +9,11 @@ import java.lang.System.{ currentTimeMillis ⇒ newTimestamp }
 import java.lang.management.{ OperatingSystemMXBean, MemoryMXBean, ManagementFactory }
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-
 import scala.collection.immutable.{ SortedSet, Map }
 import scala.concurrent.duration._
 import scala.concurrent.forkjoin.ThreadLocalRandom
 import scala.runtime.{ RichLong, RichDouble, RichInt }
 import scala.util.{ Try, Success, Failure }
-
 import akka.ConfigurationException
 import akka.actor.Actor
 import akka.actor.ActorLogging
@@ -26,6 +24,7 @@ import akka.actor.DynamicAccess
 import akka.actor.ExtendedActorSystem
 import akka.cluster.MemberStatus.Up
 import akka.event.Logging
+import java.lang.management.MemoryUsage
 
 /**
  * INTERNAL API.
@@ -273,6 +272,8 @@ private[cluster] case class DataStream(decay: Int, ewma: Double, startTime: Long
 
 }
 
+// FIXME feels wrong that Metric value is optional, either there is a Metric or there is not
+
 /**
  * INTERNAL API
  *
@@ -325,7 +326,6 @@ private[cluster] case class Metric private (name: String, value: Option[Number],
  * Companion object of Metric class.
  */
 private[cluster] object Metric extends MetricNumericConverter {
-  import NodeMetrics.MetricValues._
 
   private def definedValue(value: Option[Number]): Option[Number] =
     if (value.isDefined && defined(value.get)) value else None
@@ -357,21 +357,12 @@ private[cluster] object Metric extends MetricNumericConverter {
  * The snapshot of current sampled health metrics for any monitored process.
  * Collected and gossipped at regular intervals for dynamic cluster management strategies.
  *
- * For the JVM memory. The amount of used and committed memory will always be <= max if max is defined.
- * A memory allocation may fail if it attempts to increase the used memory such that used > committed
- * even if used <= max is true (e.g. when the system virtual memory is low).
- *
- * The system is possibly nearing a bottleneck if the system load average is nearing in cpus/cores.
- *
  * @param address [[akka.actor.Address]] of the node the metrics are gathered at
- *
  * @param timestamp the time of sampling
  *
- * @param metrics the array of sampled [[akka.actor.Metric]]
+ * @param metrics the set of sampled [[akka.actor.Metric]]
  */
 private[cluster] case class NodeMetrics(address: Address, timestamp: Long, metrics: Set[Metric] = Set.empty[Metric]) extends ClusterMessage {
-  import NodeMetrics._
-  import NodeMetrics.MetricValues._
 
   /**
    * Returns the most recent data.
@@ -388,15 +379,7 @@ private[cluster] case class NodeMetrics(address: Address, timestamp: Long, metri
    */
   def same(that: NodeMetrics): Boolean = address == that.address
 
-  /**
-   * Of all the data streams, this fluctuates the most.
-   */
-  def heapMemory: HeapMemory = HeapMemory(metric(HeapMemoryUsed), metric(HeapMemoryCommitted), metric(HeapMemoryMax))
-
-  def networkLatency: NetworkLatency = NetworkLatency(metric(NetworkInboundRate), metric(NetworkOutboundRate))
-
-  def cpu: Cpu = Cpu(metric(SystemLoadAverage), metric(Processors), metric(CpuCombined), metric(TotalCores))
-
+  // FIXME perhaps a meticsByName: Map[String, Metric] instead
   def metric(key: String): Metric = metrics.collectFirst { case m if m.name == key ⇒ m } getOrElse Metric(key)
 
 }
@@ -404,79 +387,133 @@ private[cluster] case class NodeMetrics(address: Address, timestamp: Long, metri
 /**
  * INTERNAL API
  *
- * Companion object of Metric class - used by metrics consumers such as the load balancing routers.
+ * Definitions of the built-in standard metrics.
  *
- * The following extractors and orderings hide the implementation from cluster metric consumers
- * such as load balancers.
+ * The following extractors and data structures makes it easy to consume the
+ * [[akka.cluster.NodeMetrics]] in for example load balancers.
  */
-private[cluster] object NodeMetrics {
+private[cluster] object StandardMetrics {
 
-  sealed trait MetricValues
+  object HeapMemory {
+    /**
+     * Constants for the heap related Metric names
+     */
+    object Fields {
+      final val HeapMemoryUsed = "heap-memory-used"
+      final val HeapMemoryCommitted = "heap-memory-committed"
+      final val HeapMemoryMax = "heap-memory-max"
+    }
+    import Fields._
 
-  object MetricValues {
-
-    final val HeapMemoryUsed = "heap-memory-used"
-    final val HeapMemoryCommitted = "heap-memory-committed"
-    final val HeapMemoryMax = "heap-memory-max"
-    final val NetworkInboundRate = "network-max-inbound"
-    final val NetworkOutboundRate = "network-max-outbound"
-    final val SystemLoadAverage = "system-load-average"
-    final val Processors = "processors"
-    final val CpuCombined = "cpu-combined"
-    final val TotalCores = "total-cores"
-
-    def unapply(v: HeapMemory): Tuple3[Long, Long, Option[Long]] =
-      (v.used.averageValue.get.longValue,
-        v.committed.averageValue.get.longValue,
-        v.max.averageValue map (_.longValue) orElse None)
-
-    def unapply(v: NetworkLatency): Option[(Long, Long)] =
-      (v.inbound.averageValue, v.outbound.averageValue) match {
-        case (Some(a), Some(b)) ⇒ Some((a.longValue, b.longValue))
-        case _                  ⇒ None
+    /**
+     * Given a NodeMetrics it returns the HeapMemory data if the nodeMetrics contains
+     * necessary heap metrics.
+     */
+    def unapply(nodeMetrics: NodeMetrics): Option[HeapMemory] = {
+      val used = nodeMetrics.metric(HeapMemoryUsed).averageValue
+      val committed = nodeMetrics.metric(HeapMemoryCommitted).averageValue
+      val max = nodeMetrics.metric(HeapMemoryMax).averageValue
+      (used, committed) match {
+        case (Some(u), Some(c)) ⇒
+          Some(HeapMemory(nodeMetrics.address, nodeMetrics.timestamp,
+            u.longValue, u.longValue, max map (_.longValue)))
+        case _ ⇒ None
       }
-
-    def unapply(v: Cpu): Tuple4[Option[Double], Int, Option[Double], Option[Int]] =
-      (v.systemLoadAverage.averageValue map (_.doubleValue),
-        v.processors.averageValue.get.intValue,
-        v.combinedCpu.averageValue map (_.doubleValue),
-        v.cores.averageValue map (_.intValue))
+    }
   }
 
   /**
+   * The amount of used and committed memory will always be <= max if max is defined.
+   * A memory allocation may fail if it attempts to increase the used memory such that used > committed
+   * even if used <= max is true (e.g. when the system virtual memory is low).
+   *
    * @param used the current sum of heap memory used from all heap memory pools (in bytes)
-   *
    * @param committed the current sum of heap memory guaranteed to be available to the JVM
-   * from all heap memory pools (in bytes). Committed will always be greater than or equal to used.
-   *
+   *   from all heap memory pools (in bytes). Committed will always be greater than or equal to used.
    * @param max the maximum amount of memory (in bytes) that can be used for JVM memory management.
-   *            Can be undefined on some OS.
+   *   Can be undefined on some OS.
    */
-  case class HeapMemory(used: Metric, committed: Metric, max: Metric) extends MetricValues {
-    require(used.isDefined, "used must be defined")
-    require(committed.isDefined, "committed must be defined")
+  case class HeapMemory(address: Address, timestamp: Long, used: Long, committed: Long, max: Option[Long]) {
+    require(committed > 0L, "committed heap expected to be > 0 bytes")
+    require(max.isEmpty || max.get > 0L, "max heap expected to be > 0 bytes")
+  }
+
+  object NetworkIO {
+    /**
+     * Constants for the network related Metric names
+     */
+    object Fields {
+      final val NetworkInboundRate = "network-max-inbound"
+      final val NetworkOutboundRate = "network-max-outbound"
+    }
+    import Fields._
+
+    /**
+     * Given a NodeMetrics it returns the NetworkIO data if the nodeMetrics contains
+     * necessary network metrics.
+     */
+    def unapply(nodeMetrics: NodeMetrics): Option[NetworkIO] = {
+      val in = nodeMetrics.metric(NetworkInboundRate).averageValue
+      val out = nodeMetrics.metric(NetworkOutboundRate).averageValue
+      (in, out) match {
+        case (Some(i), Some(o)) ⇒
+          Some(NetworkIO(nodeMetrics.address, nodeMetrics.timestamp, i, o))
+        case _ ⇒ None
+      }
+    }
   }
 
   /**
-   * @param inbound the inbound network IO rate, in bytes
-   *
-   * @param outbound the outbound network IO rate, in bytes
+   * @param inbound the inbound network IO rate, in bytes/second
+   * @param outbound the outbound network IO rate, in bytes/second
    */
-  case class NetworkLatency(inbound: Metric, outbound: Metric) extends MetricValues
+  case class NetworkIO(address: Address, timestamp: Long, inbound: Double, outbound: Double)
+
+  object Cpu {
+    /**
+     * Constants for the cpu related Metric names
+     */
+    object Fields {
+      final val SystemLoadAverage = "system-load-average"
+      final val Processors = "processors"
+      final val CpuCombined = "cpu-combined"
+      final val TotalCores = "total-cores"
+    }
+    import Fields._
+
+    /**
+     * Given a NodeMetrics it returns the Cpu data if the nodeMetrics contains
+     * necessary cpu metrics.
+     */
+    def unapply(nodeMetrics: NodeMetrics): Option[Cpu] = {
+      val systemLoadAverage = nodeMetrics.metric(SystemLoadAverage).averageValue
+      val cpuCombined = nodeMetrics.metric(CpuCombined).averageValue
+      val processors = nodeMetrics.metric(Processors).value
+      val cores = nodeMetrics.metric(TotalCores).value
+      processors match {
+        case Some(p) ⇒
+          Some(Cpu(nodeMetrics.address, nodeMetrics.timestamp,
+            systemLoadAverage, cpuCombined, p.intValue, cores.map(_.intValue)))
+        case _ ⇒ None
+      }
+    }
+  }
 
   /**
-   * @param systemLoadAverage OS-specific average load on the CPUs in the system, for the past 1 minute
-   *
+   * @param systemLoadAverage OS-specific average load on the CPUs in the system, for the past 1 minute,
+   *    The system is possibly nearing a bottleneck if the system load average is nearing in cpus/cores.
    * @param processors the number of available processors
-   *
-   * @param combinedCpu combined CPU sum of User + Sys + Nice + Wait, in percentage. This metric can describe
-   * the amount of time the CPU spent executing code during n-interval and how much more it could theoretically.
-   *
+   * @param cpuCombined combined CPU sum of User + Sys + Nice + Wait, in percentage. This metric can describe
+   *   the amount of time the CPU spent executing code during n-interval and how much more it could theoretically.
    * @param cores the number of cores (multi-core: per processor)
    */
-  private[cluster] case class Cpu(systemLoadAverage: Metric, processors: Metric, combinedCpu: Metric, cores: Metric) extends MetricValues {
-    require(processors.isDefined, "processors must be defined")
-  }
+  case class Cpu(
+    address: Address,
+    timestamp: Long,
+    systemLoadAverage: Option[Double],
+    cpuCombined: Option[Double],
+    processors: Int,
+    cores: Option[Int])
 
 }
 
@@ -535,7 +572,8 @@ private[cluster] trait MetricsCollector extends Closeable {
  * @param decay how quickly the exponential weighting of past data is decayed
  */
 private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends MetricsCollector {
-  import NodeMetrics.MetricValues._
+  import StandardMetrics.HeapMemory.Fields._
+  import StandardMetrics.Cpu.Fields._
 
   private def this(cluster: Cluster) =
     this(cluster.selfAddress, cluster.settings.MetricsRateOfDecay)
@@ -551,8 +589,12 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   /**
    * Samples and collects new data points.
    */
-  def sample: NodeMetrics = NodeMetrics(address, newTimestamp, Set(
-    systemLoadAverage, heapUsed, heapCommitted, heapMax, processors))
+  def sample: NodeMetrics = NodeMetrics(address, newTimestamp, metrics)
+
+  def metrics: Set[Metric] = {
+    val heap = heapMemoryUsage
+    Set(systemLoadAverage, heapUsed(heap), heapCommitted(heap), heapMax(heap), processors)
+  }
 
   /**
    * JMX Returns the OS-specific average load on the CPUs in the system, for the past 1 minute.
@@ -572,23 +614,26 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
     value = Some(osMBean.getAvailableProcessors),
     decay = None)
 
-  // FIXME those three heap calls should be done at once
+  /**
+   * Current heap to be passed in to heapUsed, heapCommitted and heapMax
+   */
+  def heapMemoryUsage: MemoryUsage = memoryMBean.getHeapMemoryUsage
 
   /**
    * (JMX) Returns the current sum of heap memory used from all heap memory pools (in bytes).
    */
-  def heapUsed: Metric = Metric(
+  def heapUsed(heap: MemoryUsage): Metric = Metric(
     name = HeapMemoryUsed,
-    value = Some(memoryMBean.getHeapMemoryUsage.getUsed),
+    value = Some(heap.getUsed),
     decay = decayOption)
 
   /**
    * (JMX) Returns the current sum of heap memory guaranteed to be available to the JVM
    * from all heap memory pools (in bytes).
    */
-  def heapCommitted: Metric = Metric(
+  def heapCommitted(heap: MemoryUsage): Metric = Metric(
     name = HeapMemoryCommitted,
-    value = Some(memoryMBean.getHeapMemoryUsage.getCommitted),
+    value = Some(heap.getCommitted),
     decay = decayOption)
 
   /**
@@ -596,12 +641,12 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
    * for JVM memory management. If not defined the metrics value is None, i.e.
    * never negative.
    */
-  def heapMax: Metric = Metric(
+  def heapMax(heap: MemoryUsage): Metric = Metric(
     name = HeapMemoryMax,
-    value = Some(memoryMBean.getHeapMemoryUsage.getMax),
+    value = Some(heap.getMax),
     decay = None)
 
-  def close(): Unit = ()
+  override def close(): Unit = ()
 
 }
 
@@ -623,7 +668,10 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
  */
 private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar: AnyRef)
   extends JmxMetricsCollector(address, decay) {
-  import NodeMetrics.MetricValues._
+
+  import StandardMetrics.HeapMemory.Fields._
+  import StandardMetrics.Cpu.Fields._
+  import StandardMetrics.NetworkIO.Fields._
 
   def this(address: Address, decay: Int, dynamicAccess: DynamicAccess) =
     this(address, decay, dynamicAccess.createInstanceFor[AnyRef]("org.hyperic.sigar.Sigar", Seq.empty).get)
@@ -661,11 +709,10 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
     case None ⇒ throw new IllegalArgumentException("Wrong version of Sigar, expected 'getPid' method")
   }
 
-  /**
-   * Samples and collects new data points.
-   */
-  override def sample: NodeMetrics = NodeMetrics(address, newTimestamp, Set(cpuCombined, totalCores,
-    systemLoadAverage, heapUsed, heapCommitted, heapMax, processors, networkMaxRx, networkMaxTx))
+  override def metrics: Set[Metric] = {
+    super.metrics.filterNot(_.name == SystemLoadAverage) ++
+      Set(systemLoadAverage, cpuCombined, totalCores, networkMaxRx, networkMaxTx)
+  }
 
   /**
    * (SIGAR / JMX) Returns the OS-specific average load on the CPUs in the system, for the past 1 minute.
@@ -723,7 +770,7 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
    */
   override def close(): Unit = Try(createMethodFrom(sigar, "close").get.invoke(sigar))
 
-  // FIXME network metrics needs thought and refactoring
+  // FIXME network metrics needs thought and refactoring, I think this is accumulated bytes, rate must be calculated
 
   /**
    * Returns the max bytes for the given <code>method</code> in metric for <code>metric</code> from the network interface stats.

@@ -6,13 +6,14 @@ package akka.cluster
 
 import scala.util.Try
 import akka.actor.Address
-import akka.cluster.NodeMetrics.MetricValues._
 import akka.testkit.AkkaSpec
+import akka.cluster.StandardMetrics.HeapMemory
+import akka.cluster.StandardMetrics.Cpu
+import akka.cluster.StandardMetrics.NetworkIO
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSpec
   with MetricsCollectorFactory {
-  import NodeMetrics._
 
   val collector = createMetricsCollector
 
@@ -38,43 +39,50 @@ class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSp
 
   "NodeMetrics.MetricValues" must {
     "extract expected metrics for load balancing" in {
+      import HeapMemory.Fields._
       val stream1 = node2.metric(HeapMemoryCommitted).value.get.longValue
       val stream2 = node1.metric(HeapMemoryUsed).value.get.longValue
       stream1 must be >= (stream2)
     }
 
     "extract expected MetricValue types for load balancing" in {
-      nodes foreach {
-        node ⇒
-          val (used, committed, max) = MetricValues.unapply(node.heapMemory)
-          committed must be >= (used)
-          max match {
-            case Some(m) ⇒
-              used must be <= (m)
-              committed must be <= (m)
-            case None ⇒
-              used must be > (0L)
-              committed must be > (0L)
-          }
+      nodes foreach { node ⇒
+        node match {
+          case HeapMemory(heap) ⇒
+            heap.committed must be >= (heap.used)
+            heap.max match {
+              case Some(m) ⇒
+                heap.used must be <= (m)
+                heap.committed must be <= (m)
+              case None ⇒
+                heap.used must be > (0L)
+                heap.committed must be > (0L)
+            }
+          case _ ⇒ fail("no heap")
+        }
 
-          val network = MetricValues.unapply(node.networkLatency)
-          if (network.isDefined) {
-            network.get._1 must be > (0L)
-            network.get._2 must be > (0L)
-          }
+        node match {
+          case NetworkIO(net) ⇒
+            net.inbound must be >= (0.0)
+            net.outbound must be >= (0.0)
+          case _ ⇒ // ok, only collected by sigar
+        }
 
-          val (systemLoadAverage, processors, combinedCpu, cores) = MetricValues.unapply(node.cpu)
-          processors must be > (0)
-          if (systemLoadAverage.isDefined)
-            systemLoadAverage.get must be >= (0.0)
-          if (combinedCpu.isDefined) {
-            combinedCpu.get must be <= (1.0)
-            combinedCpu.get must be >= (0.0)
-          }
-          if (cores.isDefined) {
-            cores.get must be > (0)
-            cores.get must be >= (processors)
-          }
+        node match {
+          case Cpu(cpu) ⇒
+            cpu.processors must be > (0)
+            if (cpu.systemLoadAverage.isDefined)
+              cpu.systemLoadAverage.get must be >= (0.0)
+            if (cpu.cpuCombined.isDefined) {
+              cpu.cpuCombined.get must be <= (1.0)
+              cpu.cpuCombined.get must be >= (0.0)
+            }
+            if (cpu.cores.isDefined) {
+              cpu.cores.get must be > (0)
+              cpu.cores.get must be >= (cpu.processors)
+            }
+          case _ ⇒ fail("no cpu")
+        }
       }
     }
   }
