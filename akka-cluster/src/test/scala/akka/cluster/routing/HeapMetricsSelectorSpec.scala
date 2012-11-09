@@ -28,19 +28,19 @@ class HeapMetricsSelectorSpec extends AkkaSpec(ConfigFactory.parseString("""
   val decay = Some(10)
 
   val nodeMetricsA = NodeMetrics(a1, System.currentTimeMillis, Set(
-    Metric(HeapMemoryUsed, Some(BigInt(128)), decay),
-    Metric(HeapMemoryCommitted, Some(BigInt(256)), decay),
-    Metric(HeapMemoryMax, Some(BigInt(512)), None)))
+    Metric.create(HeapMemoryUsed, 128, decay),
+    Metric.create(HeapMemoryCommitted, 256, decay),
+    Metric.create(HeapMemoryMax, 512, None)).flatten)
 
   val nodeMetricsB = NodeMetrics(b1, System.currentTimeMillis, Set(
-    Metric(HeapMemoryUsed, Some(BigInt(256)), decay),
-    Metric(HeapMemoryCommitted, Some(BigInt(512)), decay),
-    Metric(HeapMemoryMax, Some(BigInt(1024)), None)))
+    Metric.create(HeapMemoryUsed, 256, decay),
+    Metric.create(HeapMemoryCommitted, 512, decay),
+    Metric.create(HeapMemoryMax, 1024, None)).flatten)
 
   val nodeMetricsC = NodeMetrics(c1, System.currentTimeMillis, Set(
-    Metric(HeapMemoryUsed, Some(BigInt(1024)), decay),
-    Metric(HeapMemoryCommitted, Some(BigInt(1024)), decay),
-    Metric(HeapMemoryMax, Some(BigInt(1024)), None)))
+    Metric.create(HeapMemoryUsed, 1024, decay),
+    Metric.create(HeapMemoryCommitted, 1024, decay),
+    Metric.create(HeapMemoryMax, 1024, None)).flatten)
 
   val nodeMetrics = Set(nodeMetricsA, nodeMetricsB, nodeMetricsC)
 

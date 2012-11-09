@@ -199,14 +199,14 @@ case object HeapMetricsSelector extends MetricsSelector {
   def getInstance = this
 
   override def capacity(nodeMetrics: Set[NodeMetrics]): Map[Address, Double] = {
-    nodeMetrics collect {
+    nodeMetrics.collect {
       case HeapMemory(heap) ⇒
         val capacity = heap.max match {
           case None    ⇒ (heap.committed - heap.used).toDouble / heap.committed
           case Some(m) ⇒ (m - heap.used).toDouble / m
         }
         (heap.address, capacity)
-    } toMap
+    }.toMap
   }
 }
 

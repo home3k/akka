@@ -11,7 +11,7 @@ import scala.concurrent.forkjoin.ThreadLocalRandom
 import System.currentTimeMillis
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class DataStreamSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSpec with MetricsCollectorFactory {
+class DataStreamSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricsCollectorFactory {
   import system.dispatcher
 
   val collector = createMetricsCollector
@@ -61,14 +61,14 @@ class DataStreamSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSpec
           streamingDataSet.get(latest.name) match {
             case None ⇒ Some(latest)
             case Some(previous) ⇒
-              if (latest.average.isDefined && latest.isDefined && latest.value.get != previous.value.get) {
+              if (latest.average.isDefined && latest.value != previous.value) {
                 val updated = previous :+ latest
                 updated.average.isDefined must be(true)
                 val updatedAverage = updated.average.get
                 updatedAverage.timestamp must be > (previous.average.get.timestamp)
                 updatedAverage.duration.length must be > (previous.average.get.duration.length)
                 updatedAverage.ewma must not be (previous.average.get.ewma)
-                (previous.value.get.longValue compare latest.value.get.longValue) must be(
+                (previous.value.longValue compare latest.value.longValue) must be(
                   previous.average.get.ewma.longValue compare updatedAverage.ewma.longValue)
                 Some(updated)
               } else None

@@ -8,8 +8,7 @@ import akka.testkit.AkkaSpec
 import akka.actor.Address
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class NodeMetricsSpec extends AkkaSpec with MetricSpec
-  with MetricsCollectorFactory {
+class NodeMetricsSpec extends AkkaSpec with MetricsCollectorFactory {
 
   val collector = createMetricsCollector
 

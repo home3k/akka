@@ -12,8 +12,7 @@ import akka.cluster.StandardMetrics.Cpu
 import akka.cluster.StandardMetrics.NetworkIO
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSpec
-  with MetricsCollectorFactory {
+class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricsCollectorFactory {
 
   val collector = createMetricsCollector
 
@@ -30,7 +29,7 @@ class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSp
           case streaming if latest same streaming ⇒
             streaming.average match {
               case Some(e) ⇒ streaming.copy(value = latest.value, average =
-                if (latest.isDefined) Some(e :+ latest.value.get.doubleValue) else None)
+                Some(e :+ latest.value.doubleValue))
               case None ⇒ streaming.copy(value = latest.value)
             }
         }))
@@ -40,8 +39,8 @@ class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricSp
   "NodeMetrics.MetricValues" must {
     "extract expected metrics for load balancing" in {
       import HeapMemory.Fields._
-      val stream1 = node2.metric(HeapMemoryCommitted).value.get.longValue
-      val stream2 = node1.metric(HeapMemoryUsed).value.get.longValue
+      val stream1 = node2.metric(HeapMemoryCommitted).get.value.longValue
+      val stream2 = node1.metric(HeapMemoryUsed).get.value.longValue
       stream1 must be >= (stream2)
     }
 

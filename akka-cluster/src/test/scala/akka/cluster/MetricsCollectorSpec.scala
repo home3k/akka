@@ -28,8 +28,7 @@ object MetricsEnabledSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with ImplicitSender with MetricSpec
-  with MetricsCollectorFactory {
+class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with ImplicitSender with MetricsCollectorFactory {
   import system.dispatcher
 
   val collector = createMetricsCollector
@@ -40,25 +39,27 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
       for (i ← 1 to 20) {
         val sample1 = collector.sample.metrics
         val sample2 = collector.sample.metrics
-        var merged = sample2 flatMap (latest ⇒ sample1 collect {
+        val merged12 = sample2 flatMap (latest ⇒ sample1 collect {
           case peer if latest same peer ⇒ {
             val m = peer :+ latest
-            assertMerged(latest, peer, m)
+            m.value must be(latest.value)
+            m.average.isDefined must be(peer.average.isDefined || latest.average.isDefined)
             m
           }
         })
 
         val sample3 = collector.sample.metrics
         val sample4 = collector.sample.metrics
-        merged = sample4 flatMap (latest ⇒ sample3 collect {
+        val merged34 = sample4 flatMap (latest ⇒ sample3 collect {
           case peer if latest same peer ⇒ {
             val m = peer :+ latest
-            assertMerged(latest, peer, m)
+            m.value must be(latest.value)
+            m.average.isDefined must be(peer.average.isDefined || latest.average.isDefined)
             m
           }
         })
-        merged.size must be(sample3.size)
-        merged.size must be(sample4.size)
+        merged34.size must be(sample3.size)
+        merged34.size must be(sample4.size)
       }
     }
   }
@@ -71,7 +72,7 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
 
     "collect accurate metrics for a node" in {
       val sample = collector.sample
-      val metrics = sample.metrics.collect { case m if m.isDefined ⇒ (m.name, m.value.get) }
+      val metrics = sample.metrics.collect { case m ⇒ (m.name, m.value) }
       val used = metrics collectFirst { case (HeapMemoryUsed, b) ⇒ b }
       val committed = metrics collectFirst { case (HeapMemoryCommitted, b) ⇒ b }
       metrics foreach {
@@ -123,47 +124,6 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
         Thread.sleep(100)
       }
     }
-  }
-}
-
-trait MetricSpec extends WordSpec with MustMatchers { this: { def system: ActorSystem } ⇒
-
-  def assertMasterMetricsAgainstGossipMetrics(master: Set[NodeMetrics], gossip: MetricsGossip): Unit = {
-    val masterMetrics = collectNodeMetrics(master)
-    val gossipMetrics = collectNodeMetrics(gossip.nodes)
-    gossipMetrics.size must be(masterMetrics.size plusOrMinus 1) // combined cpu
-  }
-
-  def assertExpectedNodeAddresses(gossip: MetricsGossip, nodes: Set[NodeMetrics]): Unit =
-    gossip.nodes.map(_.address) must be(nodes.map(_.address))
-
-  def assertMerged(latest: Metric, peer: Metric, merged: Metric): Unit = if (latest same peer) {
-    if (latest.isDefined) {
-      if (peer.isDefined) {
-        merged.isDefined must be(true)
-        merged.value.get must be(latest.value.get)
-        merged.average.isDefined must be(latest.average.isDefined)
-      } else {
-        merged.isDefined must be(true)
-        merged.value.get must be(latest.value.get)
-        merged.average.isDefined must be(latest.average.isDefined || peer.average.isDefined)
-      }
-    } else {
-      if (peer.isDefined) {
-        merged.isDefined must be(true)
-        merged.value.get must be(peer.value.get)
-        merged.average.isDefined must be(peer.average.isDefined)
-      } else {
-        merged.isDefined must be(false)
-        merged.average.isEmpty must be(true)
-      }
-    }
-  }
-
-  def collectNodeMetrics(nodes: Set[NodeMetrics]): Seq[Metric] = {
-    var r: Seq[Metric] = Seq.empty
-    nodes.foreach(n ⇒ r ++= n.metrics.filter(_.isDefined))
-    r
   }
 }
 

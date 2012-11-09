@@ -6,9 +6,10 @@ package akka.cluster
 
 import akka.testkit.{ ImplicitSender, AkkaSpec }
 import akka.cluster.StandardMetrics.HeapMemory.Fields._
+import scala.util.Try
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricNumericConverter with ImplicitSender with MetricSpec
+class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricNumericConverter with ImplicitSender
   with MetricsCollectorFactory {
 
   "MetricNumericConverter" must {
@@ -22,10 +23,9 @@ class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) wit
     }
 
     "define a new metric" in {
-      val metric = Metric(HeapMemoryUsed, Some(256L), decay = Some(10))
+      val Some(metric) = Metric.create(HeapMemoryUsed, 256L, decay = Some(10))
       metric.name must be(HeapMemoryUsed)
-      metric.isDefined must be(true)
-      metric.value must be(Some(256L))
+      metric.value must be(256L)
       metric.average.isDefined must be(true)
       metric.average.get.ewma must be(256L)
 
@@ -33,15 +33,15 @@ class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) wit
         case c: SigarMetricsCollector ⇒
           val cores = c.totalCores
           cores.isDefined must be(true)
-          cores.value.get.intValue must be > (0)
+          cores.get.value.intValue must be > (0)
         case _ ⇒
       }
     }
 
     "define an undefined value with a None " in {
-      Metric("x", Some(-1), None).value.isDefined must be(false)
-      Metric("x", Some(java.lang.Double.NaN), None).value.isDefined must be(false)
-      Metric("x", None, None).isDefined must be(false)
+      Metric.create("x", -1, None).isDefined must be(false)
+      Metric.create("x", java.lang.Double.NaN, None).isDefined must be(false)
+      Metric.create("x", Try(throw new RuntimeException), None).isDefined must be(false)
     }
 
     "recognize whether a metric value is defined" in {
