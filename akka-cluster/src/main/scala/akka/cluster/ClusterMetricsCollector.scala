@@ -36,8 +36,8 @@ import java.lang.management.MemoryUsage
  *
  * Metrics sampling is delegated to the [[akka.cluster.MetricsCollector]].
  *
- * Calculation of statistical data for each monitored process is delegated to the
- * [[akka.cluster.DataStream]] for exponential smoothing, with additional decay factor.
+ * Smoothing of the data for each monitored process is delegated to the
+ * [[akka.cluster.EWMA]] for exponential weighted moving average.
  */
 private[cluster] class ClusterMetricsCollector(publisher: ActorRef) extends Actor with ActorLogging {
 
@@ -224,22 +224,38 @@ private[cluster] case class MetricsGossip(nodes: Set[NodeMetrics] = Set.empty) {
  */
 private[cluster] case class MetricsGossipEnvelope(from: Address, gossip: MetricsGossip) extends ClusterMessage
 
+object EWMA {
+  /**
+   * Calculate the alpha (decay factor) used in [[akka.cluster.EWMA]]
+   * from specified half-life and interval between observations.
+   * It takes about 4 half-life to drop below 10% contribution, and 7 to drop
+   * below 1%.
+   */
+  def alpha(halfLife: FiniteDuration, collectInterval: FiniteDuration): Double = {
+    val halfLifeMillis = halfLife.toMillis
+    require(halfLife.toMillis > 0, "halfLife must be > 0 s")
+    val decayRate = 0.69315 / halfLifeMillis
+    1 - math.exp(-decayRate * collectInterval.toMillis)
+  }
+}
+
 /**
  * The exponentially weighted moving average (EWMA) approach captures short-term
  * movements in volatility for a conditional volatility forecasting model. By virtue
  * of its alpha, or decay factor, this provides a statistical streaming data model
  * that is exponentially biased towards newer entries.
  *
+ * http://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average
+ *
  * An EWMA only needs the most recent forecast value to be kept, as opposed to a standard
  * moving average model.
  *
  * INTERNAL API
  *
- * @param decay sets how quickly the exponential weighting decays for past data compared to new data
- *              Corresponds to 'N time periods' as explained in
- *              http://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average
+ * @param alpha decay factor, sets how quickly the exponential weighting decays for past data compared to new data,
+ *   see http://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average
  *
- * @param ewma the current exponentially weighted moving average, e.g. Y(n - 1), or,
+ * @param value the current exponentially weighted moving average, e.g. Y(n - 1), or,
  *             the sampled value resulting from the previous smoothing iteration.
  *             This value is always used as the previous EWMA to calculate the new EWMA.
  *
@@ -247,30 +263,18 @@ private[cluster] case class MetricsGossipEnvelope(from: Address, gossip: Metrics
  *
  * @param startTime the time of initial sampling for this data stream
  */
-private[cluster] case class DataStream(decay: Int, ewma: Double, startTime: Long, timestamp: Long)
-  extends ClusterMessage {
+private[cluster] case class EWMA(value: Double, alpha: Double) extends ClusterMessage {
 
-  require(decay >= 1, "Rate of decay must be >= 1")
-
-  /**
-   * The rate at which the weights of past observations
-   * decay as they become more distant.
-   */
-  private val α = 2.0 / (decay + 1)
+  require(0.0 <= alpha && alpha <= 1.0, "alpha must be between 0.0 and 1.0")
 
   /**
    * Calculates the exponentially weighted moving average for a given monitored data set.
    *
    * @param xn the new data point
    *
-   * @return a [[akka.cluster.DataStream]] with the updated yn and timestamp
+   * @return a new [[akka.cluster.EWMA]] with the updated value
    */
-  def :+(xn: Double): DataStream = copy(ewma = (α * xn) + (1 - α) * ewma, timestamp = newTimestamp)
-
-  /**
-   * The duration of observation for this data stream
-   */
-  def duration: FiniteDuration = (timestamp - startTime).millis
+  def :+(xn: Double): EWMA = copy(value = (alpha * xn) + (1 - alpha) * value)
 
 }
 
@@ -285,7 +289,7 @@ private[cluster] case class DataStream(decay: Int, ewma: Double, startTime: Long
  * @param average the data stream of the metric value, for trending over time. Metrics that are already
  *                averages (e.g. system load average) or finite (e.g. as total cores), are not trended.
  */
-private[cluster] case class Metric private (name: String, value: Number, average: Option[DataStream])
+private[cluster] case class Metric private (name: String, value: Number, private val average: Option[EWMA])
   extends ClusterMessage with MetricNumericConverter {
 
   require(defined(value), "Invalid Metric [%s] value [%]".format(name, value))
@@ -304,7 +308,12 @@ private[cluster] case class Metric private (name: String, value: Number, average
   /**
    * The numerical value of the average, if defined, otherwise the latest value
    */
-  def averageValue: Double = average map (_.ewma) getOrElse value.doubleValue
+  def smoothValue: Double = average map (_.value) getOrElse value.doubleValue
+
+  /**
+   * @return true if this value is smoothed
+   */
+  def isSmooth: Boolean = average.isDefined
 
   /**
    * Returns true if <code>that</code> is tracking the same metric as this.
@@ -320,20 +329,18 @@ private[cluster] case class Metric private (name: String, value: Number, average
  */
 private[cluster] object Metric extends MetricNumericConverter {
 
-  def create(name: String, value: Number, decay: Option[Int]): Option[Metric] =
-    if (defined(value)) Some(new Metric(name, value, ceateDataStream(value.doubleValue, decay)))
+  def create(name: String, value: Number, decayFactor: Option[Double]): Option[Metric] =
+    if (defined(value)) Some(new Metric(name, value, ceateEWMA(value.doubleValue, decayFactor)))
     else None
 
-  def create(name: String, value: Try[Number], decay: Option[Int]): Option[Metric] = value match {
-    case Success(v) ⇒ create(name, v, decay)
+  def create(name: String, value: Try[Number], decayFactor: Option[Double]): Option[Metric] = value match {
+    case Success(v) ⇒ create(name, v, decayFactor)
     case Failure(_) ⇒ None
   }
 
-  private def ceateDataStream(value: Double, decay: Option[Int]): Option[DataStream] = decay match {
-    case Some(d) ⇒
-      val now = newTimestamp
-      Some(DataStream(decay.get, value, now, now))
-    case None ⇒ None
+  private def ceateEWMA(value: Double, decayFactor: Option[Double]): Option[EWMA] = decayFactor match {
+    case Some(alpha) ⇒ Some(EWMA(value, alpha))
+    case None        ⇒ None
   }
 
 }
@@ -397,9 +404,9 @@ private[cluster] object StandardMetrics {
      * necessary heap metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[HeapMemory] = {
-      val used = nodeMetrics.metric(HeapMemoryUsed).map(_.averageValue)
-      val committed = nodeMetrics.metric(HeapMemoryCommitted).map(_.averageValue)
-      val max = nodeMetrics.metric(HeapMemoryMax).map(_.averageValue)
+      val used = nodeMetrics.metric(HeapMemoryUsed).map(_.smoothValue)
+      val committed = nodeMetrics.metric(HeapMemoryCommitted).map(_.smoothValue)
+      val max = nodeMetrics.metric(HeapMemoryMax).map(_.smoothValue)
       (used, committed) match {
         case (Some(u), Some(c)) ⇒
           Some(HeapMemory(nodeMetrics.address, nodeMetrics.timestamp,
@@ -440,8 +447,8 @@ private[cluster] object StandardMetrics {
      * necessary network metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[NetworkIO] = {
-      val in = nodeMetrics.metric(NetworkInboundRate).map(_.averageValue)
-      val out = nodeMetrics.metric(NetworkOutboundRate).map(_.averageValue)
+      val in = nodeMetrics.metric(NetworkInboundRate).map(_.smoothValue)
+      val out = nodeMetrics.metric(NetworkOutboundRate).map(_.smoothValue)
       (in, out) match {
         case (Some(i), Some(o)) ⇒
           Some(NetworkIO(nodeMetrics.address, nodeMetrics.timestamp, i, o))
@@ -473,10 +480,10 @@ private[cluster] object StandardMetrics {
      * necessary cpu metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[Cpu] = {
-      val systemLoadAverage = nodeMetrics.metric(SystemLoadAverage).map(_.averageValue)
-      val cpuCombined = nodeMetrics.metric(CpuCombined).map(_.averageValue)
-      val processors = nodeMetrics.metric(Processors).map(_.averageValue)
-      val cores = nodeMetrics.metric(TotalCores).map(_.averageValue)
+      val systemLoadAverage = nodeMetrics.metric(SystemLoadAverage).map(_.smoothValue)
+      val cpuCombined = nodeMetrics.metric(CpuCombined).map(_.smoothValue)
+      val processors = nodeMetrics.metric(Processors).map(_.smoothValue)
+      val cores = nodeMetrics.metric(TotalCores).map(_.smoothValue)
       processors match {
         case Some(p) ⇒
           Some(Cpu(nodeMetrics.address, nodeMetrics.timestamp,
@@ -558,16 +565,17 @@ private[cluster] trait MetricsCollector extends Closeable {
  * @param address The [[akka.actor.Address]] of the node being sampled
  * @param decay how quickly the exponential weighting of past data is decayed
  */
-private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends MetricsCollector {
+private[cluster] class JmxMetricsCollector(address: Address, decayFactor: Double) extends MetricsCollector {
   import StandardMetrics.HeapMemory.Fields._
   import StandardMetrics.Cpu.Fields._
 
   private def this(cluster: Cluster) =
-    this(cluster.selfAddress, cluster.settings.MetricsRateOfDecay)
+    this(cluster.selfAddress,
+      EWMA.alpha(cluster.settings.MetricsDecayHalfLifeDuration, cluster.settings.MetricsInterval))
 
   def this(system: ActorSystem) = this(Cluster(system))
 
-  private val decayOption = Some(decay)
+  private val decayFactorOption = Some(decayFactor)
 
   private val memoryMBean: MemoryMXBean = ManagementFactory.getMemoryMXBean
 
@@ -591,7 +599,7 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   def systemLoadAverage: Option[Metric] = Metric.create(
     name = SystemLoadAverage,
     value = osMBean.getSystemLoadAverage,
-    decay = None)
+    decayFactor = None)
 
   /**
    * (JMX) Returns the number of available processors
@@ -599,7 +607,7 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   def processors: Option[Metric] = Metric.create(
     name = Processors,
     value = osMBean.getAvailableProcessors,
-    decay = None)
+    decayFactor = None)
 
   /**
    * Current heap to be passed in to heapUsed, heapCommitted and heapMax
@@ -612,7 +620,7 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   def heapUsed(heap: MemoryUsage): Option[Metric] = Metric.create(
     name = HeapMemoryUsed,
     value = heap.getUsed,
-    decay = decayOption)
+    decayFactor = decayFactorOption)
 
   /**
    * (JMX) Returns the current sum of heap memory guaranteed to be available to the JVM
@@ -621,7 +629,7 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   def heapCommitted(heap: MemoryUsage): Option[Metric] = Metric.create(
     name = HeapMemoryCommitted,
     value = heap.getCommitted,
-    decay = decayOption)
+    decayFactor = decayFactorOption)
 
   /**
    * (JMX) Returns the maximum amount of memory (in bytes) that can be used
@@ -631,7 +639,7 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
   def heapMax(heap: MemoryUsage): Option[Metric] = Metric.create(
     name = HeapMemoryMax,
     value = heap.getMax,
-    decay = None)
+    decayFactor = None)
 
   override def close(): Unit = ()
 
@@ -653,8 +661,8 @@ private[cluster] class JmxMetricsCollector(address: Address, decay: Int) extends
  * @param decay how quickly the exponential weighting of past data is decayed
  * @param sigar the org.hyperic.Sigar instance
  */
-private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar: AnyRef)
-  extends JmxMetricsCollector(address, decay) {
+private[cluster] class SigarMetricsCollector(address: Address, decayFactor: Double, sigar: AnyRef)
+  extends JmxMetricsCollector(address, decayFactor) {
 
   import StandardMetrics.HeapMemory.Fields._
   import StandardMetrics.Cpu.Fields._
@@ -664,11 +672,13 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
     this(address, decay, dynamicAccess.createInstanceFor[AnyRef]("org.hyperic.sigar.Sigar", Seq.empty).get)
 
   private def this(cluster: Cluster) =
-    this(cluster.selfAddress, cluster.settings.MetricsRateOfDecay, cluster.system.dynamicAccess)
+    this(cluster.selfAddress,
+      EWMA.alpha(cluster.settings.MetricsDecayHalfLifeDuration, cluster.settings.MetricsInterval),
+      cluster.system.dynamicAccess)
 
   def this(system: ActorSystem) = this(Cluster(system))
 
-  private val decayOption = Some(decay)
+  private val decayFactorOption = Some(decayFactor)
 
   private val LoadAverage: Option[Method] = createMethodFrom(sigar, "getLoadAverage")
 
@@ -710,7 +720,7 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
   override def systemLoadAverage: Option[Metric] = Metric.create(
     name = SystemLoadAverage,
     value = Try(LoadAverage.get.invoke(sigar).asInstanceOf[Array[AnyRef]](0).asInstanceOf[Number]),
-    decay = None) orElse super.systemLoadAverage
+    decayFactor = None) orElse super.systemLoadAverage
 
   /**
    * (SIGAR) Returns the combined CPU sum of User + Sys + Nice + Wait, in percentage. This metric can describe
@@ -723,7 +733,7 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
   def cpuCombined: Option[Metric] = Metric.create(
     name = CpuCombined,
     value = Try(CombinedCpu.get.invoke(Cpu.get.invoke(sigar)).asInstanceOf[Number]),
-    decay = decayOption)
+    decayFactor = decayFactorOption)
 
   /**
    * FIXME: Array[Int].head - expose all if cores per processor might differ.
@@ -735,7 +745,7 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
     name = TotalCores,
     value = Try(CpuList.get.invoke(sigar).asInstanceOf[Array[AnyRef]].map(cpu ⇒
       createMethodFrom(cpu, "getTotalCores").get.invoke(cpu).asInstanceOf[Number]).head),
-    decay = None)
+    decayFactor = None)
 
   // FIXME those two network calls should be combined into one
 
@@ -765,7 +775,7 @@ private[cluster] class SigarMetricsCollector(address: Address, decay: Int, sigar
       case (_, a) ⇒
         createMethodFrom(a, method).get.invoke(a).asInstanceOf[Long]
     }.max.asInstanceOf[Number]),
-    decay = decayOption)
+    decayFactor = decayFactorOption)
 
   /**
    * Returns the network stats per interface.

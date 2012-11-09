@@ -19,21 +19,17 @@ class MetricValuesSpec extends AkkaSpec(MetricsEnabledSpec.config) with MetricsC
   val node1 = NodeMetrics(Address("akka", "sys", "a", 2554), 1, collector.sample.metrics)
   val node2 = NodeMetrics(Address("akka", "sys", "a", 2555), 1, collector.sample.metrics)
 
-  var nodes: Seq[NodeMetrics] = Seq(node1, node2)
-
-  // work up the data streams where applicable
-  for (i ← 1 to 100) {
-    nodes = nodes map {
-      n ⇒
+  val nodes: Seq[NodeMetrics] = {
+    var nodes = Seq(node1, node2)
+    // work up the data streams where applicable
+    for (i ← 1 to 100) {
+      nodes = nodes map { n ⇒
         n.copy(metrics = collector.sample.metrics.flatMap(latest ⇒ n.metrics.collect {
-          case streaming if latest same streaming ⇒
-            streaming.average match {
-              case Some(e) ⇒ streaming.copy(value = latest.value, average =
-                Some(e :+ latest.value.doubleValue))
-              case None ⇒ streaming.copy(value = latest.value)
-            }
+          case streaming if latest same streaming ⇒ streaming :+ latest
         }))
+      }
     }
+    nodes
   }
 
   "NodeMetrics.MetricValues" must {

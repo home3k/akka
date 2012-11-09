@@ -23,11 +23,11 @@ class MetricNumericConverterSpec extends AkkaSpec(MetricsEnabledSpec.config) wit
     }
 
     "define a new metric" in {
-      val Some(metric) = Metric.create(HeapMemoryUsed, 256L, decay = Some(10))
+      val Some(metric) = Metric.create(HeapMemoryUsed, 256L, decayFactor = Some(0.18))
       metric.name must be(HeapMemoryUsed)
       metric.value must be(256L)
-      metric.average.isDefined must be(true)
-      metric.average.get.ewma must be(256L)
+      metric.isSmooth must be(true)
+      metric.smoothValue must be(256.0 plusOrMinus 0.0001)
 
       collector match {
         case c: SigarMetricsCollector ⇒

@@ -22,7 +22,6 @@ object MetricsEnabledSpec {
     akka.cluster.metrics.enabled = on
     akka.cluster.metrics.collect-interval = 1 s
     akka.cluster.metrics.gossip-interval = 1 s
-    akka.cluster.metrics.rate-of-decay = 10
     akka.actor.provider = "akka.remote.RemoteActorRefProvider"
     """
 }
@@ -43,7 +42,7 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
           case peer if latest same peer ⇒ {
             val m = peer :+ latest
             m.value must be(latest.value)
-            m.average.isDefined must be(peer.average.isDefined || latest.average.isDefined)
+            m.isSmooth must be(peer.isSmooth || latest.isSmooth)
             m
           }
         })
@@ -54,7 +53,7 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
           case peer if latest same peer ⇒ {
             val m = peer :+ latest
             m.value must be(latest.value)
-            m.average.isDefined must be(peer.average.isDefined || latest.average.isDefined)
+            m.isSmooth must be(peer.isSmooth || latest.isSmooth)
             m
           }
         })
@@ -136,15 +135,15 @@ trait MetricsCollectorFactory { this: AkkaSpec ⇒
 
   def selfAddress = extendedActorSystem.provider.rootPath.address
 
-  val defaultRateOfDecay = 10
+  val defaultDecayFactor = 2.0 / (1 + 10)
 
   def createMetricsCollector: MetricsCollector =
-    Try(new SigarMetricsCollector(selfAddress, defaultRateOfDecay, extendedActorSystem.dynamicAccess)) match {
+    Try(new SigarMetricsCollector(selfAddress, defaultDecayFactor, extendedActorSystem.dynamicAccess)) match {
       case Success(sigarCollector) ⇒ sigarCollector
       case Failure(e) ⇒
         log.debug("Metrics will be retreived from MBeans, Sigar failed to load. Reason: " +
           e.getMessage)
-        new JmxMetricsCollector(selfAddress, defaultRateOfDecay)
+        new JmxMetricsCollector(selfAddress, defaultDecayFactor)
     }
 
   def isSigar(collector: MetricsCollector): Boolean = collector.isInstanceOf[SigarMetricsCollector]
