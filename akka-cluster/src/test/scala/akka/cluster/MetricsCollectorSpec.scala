@@ -39,7 +39,7 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
         val sample1 = collector.sample.metrics
         val sample2 = collector.sample.metrics
         val merged12 = sample2 flatMap (latest ⇒ sample1 collect {
-          case peer if latest same peer ⇒ {
+          case peer if latest sameAs peer ⇒ {
             val m = peer :+ latest
             m.value must be(latest.value)
             m.isSmooth must be(peer.isSmooth || latest.isSmooth)
@@ -50,7 +50,7 @@ class MetricsCollectorSpec extends AkkaSpec(MetricsEnabledSpec.config) with Impl
         val sample3 = collector.sample.metrics
         val sample4 = collector.sample.metrics
         val merged34 = sample4 flatMap (latest ⇒ sample3 collect {
-          case peer if latest same peer ⇒ {
+          case peer if latest sameAs peer ⇒ {
             val m = peer :+ latest
             m.value must be(latest.value)
             m.isSmooth must be(peer.isSmooth || latest.isSmooth)

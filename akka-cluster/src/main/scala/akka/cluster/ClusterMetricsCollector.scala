@@ -57,7 +57,7 @@ private[cluster] class ClusterMetricsCollector(publisher: ActorRef) extends Acto
   /**
    * The latest metric values with their statistical data.
    */
-  var latestGossip: MetricsGossip = MetricsGossip()
+  var latestGossip: MetricsGossip = MetricsGossip.empty
 
   /**
    * The metrics collector that samples data on the node.
@@ -161,6 +161,13 @@ private[cluster] class ClusterMetricsCollector(publisher: ActorRef) extends Acto
 
 /**
  * INTERNAL API
+ */
+private[cluster] object MetricsGossip {
+  val empty = MetricsGossip()
+}
+
+/**
+ * INTERNAL API
  *
  * @param nodes metrics per node
  */
@@ -198,7 +205,7 @@ private[cluster] case class MetricsGossip(nodes: Set[NodeMetrics] = Set.empty) {
     val names = previous map (_.name)
 
     val (toMerge: Set[Metric], unseen: Set[Metric]) = data.metrics partition (a ⇒ names contains a.name)
-    val merged = toMerge flatMap (latest ⇒ previous.collect { case peer if latest same peer ⇒ peer :+ latest })
+    val merged = toMerge flatMap (latest ⇒ previous.collect { case peer if latest sameAs peer ⇒ peer :+ latest })
 
     val refreshed = nodes filterNot (_.address == data.address)
     copy(nodes = refreshed + data.copy(metrics = unseen ++ merged))
@@ -259,9 +266,6 @@ object EWMA {
  *             the sampled value resulting from the previous smoothing iteration.
  *             This value is always used as the previous EWMA to calculate the new EWMA.
  *
- * @param timestamp the most recent time of sampling
- *
- * @param startTime the time of initial sampling for this data stream
  */
 private[cluster] case class EWMA(value: Double, alpha: Double) extends ClusterMessage {
 
@@ -298,7 +302,7 @@ private[cluster] case class Metric private (name: String, value: Number, private
    * If defined ( [[akka.cluster.MetricNumericConverter.defined()]] ), updates the new
    * data point, and if defined, updates the data stream. Returns the updated metric.
    */
-  def :+(latest: Metric): Metric = if (this same latest) average match {
+  def :+(latest: Metric): Metric = if (this sameAs latest) average match {
     case Some(avg)                        ⇒ copy(value = latest.value, average = Some(avg :+ latest.value.doubleValue))
     case None if latest.average.isDefined ⇒ copy(value = latest.value, average = latest.average)
     case _                                ⇒ copy(value = latest.value)
@@ -308,7 +312,10 @@ private[cluster] case class Metric private (name: String, value: Number, private
   /**
    * The numerical value of the average, if defined, otherwise the latest value
    */
-  def smoothValue: Double = average map (_.value) getOrElse value.doubleValue
+  def smoothValue: Double = average match {
+    case Some(avg) ⇒ avg.value
+    case None      ⇒ value.doubleValue
+  }
 
   /**
    * @return true if this value is smoothed
@@ -318,7 +325,7 @@ private[cluster] case class Metric private (name: String, value: Number, private
   /**
    * Returns true if <code>that</code> is tracking the same metric as this.
    */
-  def same(that: Metric): Boolean = name == that.name
+  def sameAs(that: Metric): Boolean = name == that.name
 
 }
 
@@ -329,10 +336,20 @@ private[cluster] case class Metric private (name: String, value: Number, private
  */
 private[cluster] object Metric extends MetricNumericConverter {
 
+  /**
+   * Creates a new Metric instance if the value is valid, otherwise None
+   * is returned. Invalid numeric values are negative Int/Long and NaN/Infinite
+   * Double values.
+   */
   def create(name: String, value: Number, decayFactor: Option[Double]): Option[Metric] =
     if (defined(value)) Some(new Metric(name, value, ceateEWMA(value.doubleValue, decayFactor)))
     else None
 
+  /**
+   * Creates a new Metric instance if the Try is successful and the value is valid,
+   * otherwise None is returned. Invalid numeric values are negative Int/Long and
+   * NaN/Infinite Double values.
+   */
   def create(name: String, value: Try[Number], decayFactor: Option[Double]): Option[Metric] = value match {
     case Success(v) ⇒ create(name, v, decayFactor)
     case Failure(_) ⇒ None
@@ -352,7 +369,8 @@ private[cluster] object Metric extends MetricNumericConverter {
  * Collected and gossipped at regular intervals for dynamic cluster management strategies.
  *
  * @param address [[akka.actor.Address]] of the node the metrics are gathered at
- * @param timestamp the time of sampling
+ *
+ * @param timestamp the time of sampling, in milliseconds since midnight, January 1, 1970 UTC
  *
  * @param metrics the set of sampled [[akka.actor.Metric]]
  */
@@ -366,12 +384,12 @@ private[cluster] case class NodeMetrics(address: Address, timestamp: Long, metri
   /**
    * Returns true if <code>that</code> address is the same as this and its metric set is more recent.
    */
-  def updatable(that: NodeMetrics): Boolean = (this same that) && (that.timestamp > timestamp)
+  def updatable(that: NodeMetrics): Boolean = (this sameAs that) && (that.timestamp > timestamp)
 
   /**
    * Returns true if <code>that</code> address is the same as this
    */
-  def same(that: NodeMetrics): Boolean = address == that.address
+  def sameAs(that: NodeMetrics): Boolean = address == that.address
 
   // FIXME perhaps a meticsByName: Map[String, Metric] instead
   def metric(key: String): Option[Metric] = metrics.collectFirst { case m if m.name == key ⇒ m }
@@ -404,15 +422,12 @@ private[cluster] object StandardMetrics {
      * necessary heap metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[HeapMemory] = {
-      val used = nodeMetrics.metric(HeapMemoryUsed).map(_.smoothValue)
-      val committed = nodeMetrics.metric(HeapMemoryCommitted).map(_.smoothValue)
-      val max = nodeMetrics.metric(HeapMemoryMax).map(_.smoothValue)
-      (used, committed) match {
-        case (Some(u), Some(c)) ⇒
-          Some(HeapMemory(nodeMetrics.address, nodeMetrics.timestamp,
-            u.longValue, u.longValue, max map (_.longValue)))
-        case _ ⇒ None
-      }
+      for {
+        used ← nodeMetrics.metric(HeapMemoryUsed)
+        committed ← nodeMetrics.metric(HeapMemoryCommitted)
+        maxOption = nodeMetrics.metric(HeapMemoryMax).map(_.smoothValue.longValue)
+      } yield HeapMemory(nodeMetrics.address, nodeMetrics.timestamp,
+        used.smoothValue.longValue, committed.smoothValue.longValue, maxOption)
     }
   }
 
@@ -421,6 +436,8 @@ private[cluster] object StandardMetrics {
    * A memory allocation may fail if it attempts to increase the used memory such that used > committed
    * even if used <= max is true (e.g. when the system virtual memory is low).
    *
+   * @param address [[akka.actor.Address]] of the node the metrics are gathered at
+   * @param timestamp the time of sampling, in milliseconds since midnight, January 1, 1970 UTC
    * @param used the current sum of heap memory used from all heap memory pools (in bytes)
    * @param committed the current sum of heap memory guaranteed to be available to the JVM
    *   from all heap memory pools (in bytes). Committed will always be greater than or equal to used.
@@ -447,17 +464,16 @@ private[cluster] object StandardMetrics {
      * necessary network metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[NetworkIO] = {
-      val in = nodeMetrics.metric(NetworkInboundRate).map(_.smoothValue)
-      val out = nodeMetrics.metric(NetworkOutboundRate).map(_.smoothValue)
-      (in, out) match {
-        case (Some(i), Some(o)) ⇒
-          Some(NetworkIO(nodeMetrics.address, nodeMetrics.timestamp, i, o))
-        case _ ⇒ None
-      }
+      for {
+        in ← nodeMetrics.metric(NetworkInboundRate)
+        out ← nodeMetrics.metric(NetworkInboundRate)
+      } yield NetworkIO(nodeMetrics.address, nodeMetrics.timestamp, in.smoothValue, out.smoothValue)
     }
   }
 
   /**
+   * @param address [[akka.actor.Address]] of the node the metrics are gathered at
+   * @param timestamp the time of sampling, in milliseconds since midnight, January 1, 1970 UTC
    * @param inbound the inbound network IO rate, in bytes/second
    * @param outbound the outbound network IO rate, in bytes/second
    */
@@ -480,25 +496,24 @@ private[cluster] object StandardMetrics {
      * necessary cpu metrics.
      */
     def unapply(nodeMetrics: NodeMetrics): Option[Cpu] = {
-      val systemLoadAverage = nodeMetrics.metric(SystemLoadAverage).map(_.smoothValue)
-      val cpuCombined = nodeMetrics.metric(CpuCombined).map(_.smoothValue)
-      val processors = nodeMetrics.metric(Processors).map(_.smoothValue)
-      val cores = nodeMetrics.metric(TotalCores).map(_.smoothValue)
-      processors match {
-        case Some(p) ⇒
-          Some(Cpu(nodeMetrics.address, nodeMetrics.timestamp,
-            systemLoadAverage, cpuCombined, p.intValue, cores.map(_.intValue)))
-        case _ ⇒ None
-      }
+      for {
+        processors ← nodeMetrics.metric(Processors)
+        systemLoadAverageOption = nodeMetrics.metric(SystemLoadAverage).map(_.smoothValue)
+        cpuCombinedOption = nodeMetrics.metric(CpuCombined).map(_.smoothValue)
+        coresOption = nodeMetrics.metric(TotalCores).map(_.value.intValue)
+      } yield Cpu(nodeMetrics.address, nodeMetrics.timestamp,
+        systemLoadAverageOption, cpuCombinedOption, processors.value.intValue, coresOption)
     }
   }
 
   /**
+   * @param address [[akka.actor.Address]] of the node the metrics are gathered at
+   * @param timestamp the time of sampling, in milliseconds since midnight, January 1, 1970 UTC
    * @param systemLoadAverage OS-specific average load on the CPUs in the system, for the past 1 minute,
    *    The system is possibly nearing a bottleneck if the system load average is nearing in cpus/cores.
-   * @param processors the number of available processors
    * @param cpuCombined combined CPU sum of User + Sys + Nice + Wait, in percentage. This metric can describe
    *   the amount of time the CPU spent executing code during n-interval and how much more it could theoretically.
+   * @param processors the number of available processors
    * @param cores the number of cores (multi-core: per processor)
    */
   case class Cpu(

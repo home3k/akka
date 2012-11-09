@@ -112,6 +112,7 @@ abstract class ClusterLoadBalancingRouterSpec extends MultiNodeSpec(ClusterLoadB
         val iterationCount = 100
         for (i ← 0 until iterationCount) {
           router1 ! "hit"
+          // wait a while between each message, since metrics is collected periodically
           Thread.sleep(10)
         }
 
@@ -146,6 +147,7 @@ abstract class ClusterLoadBalancingRouterSpec extends MultiNodeSpec(ClusterLoadB
         val iterationCount = 100
         for (i ← 0 until iterationCount) {
           router2 ! "hit"
+          // wait a while between each message, since metrics is collected periodically
           Thread.sleep(10)
         }
 

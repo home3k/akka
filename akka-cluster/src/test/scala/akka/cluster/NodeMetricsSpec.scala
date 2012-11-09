@@ -26,11 +26,11 @@ class NodeMetricsSpec extends AkkaSpec with MetricsCollectorFactory {
     }
 
     "return correct result for 2 'same' nodes" in {
-      (NodeMetrics(node1, 0) same NodeMetrics(node1, 0)) must be(true)
+      (NodeMetrics(node1, 0) sameAs NodeMetrics(node1, 0)) must be(true)
     }
 
     "return correct result for 2 not 'same' nodes" in {
-      (NodeMetrics(node1, 0) same NodeMetrics(node2, 0)) must be(false)
+      (NodeMetrics(node1, 0) sameAs NodeMetrics(node2, 0)) must be(false)
     }
 
     "merge 2 NodeMetrics by most recent" in {

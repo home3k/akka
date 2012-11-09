@@ -147,14 +147,16 @@ trait ClusterLoadBalancingRouterLike { this: RouterConfig ⇒
 
     // Function that points to the routees to use, starts with the plain routees
     // of the routeeProvider and then changes to the current weighted routees
-    // produced by the metricsSelector. The reason for using a function is that
-    // routeeProvider.routees can change.
+    // produced by the metricsSelector via the metricsListener Actor.
+    // It's only updated by the actor, but accessed from the threads of the
+    // senders.
+    // The reason for using a function is that routeeProvider.routees can change.
     @volatile var weightedRoutees: () ⇒ IndexedSeq[ActorRef] = () ⇒ routeeProvider.routees
 
     // subscribe to ClusterMetricsChanged and update weightedRoutees
     val metricsListener = routeeProvider.context.actorOf(Props(new Actor {
 
-      val cluster = Cluster(routeeProvider.context.system)
+      val cluster = Cluster(context.system)
 
       override def preStart(): Unit = cluster.subscribe(self, classOf[ClusterMetricsChanged])
       override def postStop(): Unit = cluster.unsubscribe(self)
@@ -166,6 +168,7 @@ trait ClusterLoadBalancingRouterLike { this: RouterConfig ⇒
 
       def receiveMetrics(metrics: Set[NodeMetrics]): Unit = {
         val routees = metricsSelector.weightedRefs(routeeProvider.routees, cluster.selfAddress, metrics)
+        // update the state outside of the actor, not a recommended practice, but works fine here
         weightedRoutees = () ⇒ routees
       }
 
