@@ -65,50 +65,5 @@ class HeapMetricsSelectorSpec extends AkkaSpec(ConfigFactory.parseString("""
       weights must be(Map(a1 -> 0, b1 -> 100, c1 -> 1, d1 -> 0))
     }
 
-    "allocate weighted refs" in {
-      val weights = Map(a1 -> 1, b1 -> 3, c1 -> 10)
-      val refs = IndexedSeq(
-        system.actorFor(RootActorPath(a1) / "user" / "a"),
-        system.actorFor(RootActorPath(b1) / "user" / "b"),
-        system.actorFor(RootActorPath(c1) / "user" / "c"))
-      val result = selector.weightedRefs(refs, a1, weights)
-      val grouped = result.groupBy(_.path.address)
-      grouped(a1).size must be(1)
-      grouped(b1).size must be(3)
-      grouped(c1).size must be(10)
-    }
-
-    "allocate refs for undefined weight" in {
-      val weights = Map(a1 -> 1, b1 -> 2)
-      val refs = IndexedSeq(
-        system.actorFor(RootActorPath(a1) / "user" / "a"),
-        system.actorFor(RootActorPath(b1) / "user" / "b"),
-        system.actorFor(RootActorPath(c1) / "user" / "c"))
-      val result = selector.weightedRefs(refs, a1, weights)
-      val grouped = result.groupBy(_.path.address)
-      grouped(a1).size must be(1)
-      grouped(b1).size must be(2)
-      grouped(c1).size must be(1)
-    }
-
-    "allocate weighted local refs" in {
-      val weights = Map(a1 -> 2, b1 -> 1, c1 -> 10)
-      val refs = IndexedSeq(
-        testActor,
-        system.actorFor(RootActorPath(b1) / "user" / "b"),
-        system.actorFor(RootActorPath(c1) / "user" / "c"))
-      val result = selector.weightedRefs(refs, a1, weights)
-      result.filter(_ == testActor).size must be(2)
-    }
-
-    "not allocate ref with weight zero" in {
-      val weights = Map(a1 -> 0, b1 -> 2, c1 -> 10)
-      val refs = IndexedSeq(
-        system.actorFor(RootActorPath(a1) / "user" / "a"),
-        system.actorFor(RootActorPath(b1) / "user" / "b"),
-        system.actorFor(RootActorPath(c1) / "user" / "c"))
-      val result = selector.weightedRefs(refs, a1, weights)
-      result.filter(_ == refs.head).size must be(0)
-    }
   }
 }

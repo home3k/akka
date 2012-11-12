@@ -6,7 +6,6 @@ package akka.cluster.routing
 
 import scala.concurrent.forkjoin.ThreadLocalRandom
 import scala.collection.JavaConverters.iterableAsScalaIterableConverter
-
 import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.Address
@@ -26,6 +25,8 @@ import akka.routing.Resizer
 import akka.routing.Route
 import akka.routing.RouteeProvider
 import akka.routing.RouterConfig
+import java.util.Arrays
+import java.lang.IndexOutOfBoundsException
 
 /**
  * INTERNAL API
@@ -145,13 +146,10 @@ trait ClusterLoadBalancingRouterLike { this: RouterConfig ⇒
 
     val log = Logging(routeeProvider.context.system, routeeProvider.context.self)
 
-    // Function that points to the routees to use, starts with the plain routees
-    // of the routeeProvider and then changes to the current weighted routees
-    // produced by the metricsSelector via the metricsListener Actor.
-    // It's only updated by the actor, but accessed from the threads of the
-    // senders.
-    // The reason for using a function is that routeeProvider.routees can change.
-    @volatile var weightedRoutees: () ⇒ IndexedSeq[ActorRef] = () ⇒ routeeProvider.routees
+    // The current weighted routees, if any. Weights are produced by the metricsSelector
+    // via the metricsListener Actor. It's only updated by the actor, but accessed from
+    // the threads of the senders.
+    @volatile var weightedRoutees: Option[WeightedRoutees] = None
 
     // subscribe to ClusterMetricsChanged and update weightedRoutees
     val metricsListener = routeeProvider.context.actorOf(Props(new Actor {
@@ -167,17 +165,21 @@ trait ClusterLoadBalancingRouterLike { this: RouterConfig ⇒
       }
 
       def receiveMetrics(metrics: Set[NodeMetrics]): Unit = {
-        val routees = metricsSelector.weightedRefs(routeeProvider.routees, cluster.selfAddress, metrics)
         // update the state outside of the actor, not a recommended practice, but works fine here
-        weightedRoutees = () ⇒ routees
+        weightedRoutees = Some(new WeightedRoutees(routeeProvider.routees, cluster.selfAddress,
+          metricsSelector.weights(metrics)))
       }
 
     }).withDispatcher(routerDispatcher), name = "metricsListener")
 
-    def getNext(): ActorRef = {
-      val currentRoutees = weightedRoutees.apply
-      if (currentRoutees.isEmpty) routeeProvider.context.system.deadLetters
-      else currentRoutees(ThreadLocalRandom.current.nextInt(currentRoutees.size))
+    def getNext(): ActorRef = weightedRoutees match {
+      case Some(weighted) ⇒
+        if (weighted.total == 0) routeeProvider.context.system.deadLetters
+        else weighted(ThreadLocalRandom.current.nextInt(weighted.total) + 1)
+      case None ⇒
+        val currentRoutees = routeeProvider.routees
+        if (currentRoutees.isEmpty) routeeProvider.context.system.deadLetters
+        else currentRoutees(ThreadLocalRandom.current.nextInt(currentRoutees.size))
     }
 
     {
@@ -219,9 +221,8 @@ case object HeapMetricsSelector extends MetricsSelector {
 //       selectors.
 
 /**
- * A MetricsSelector is responsible for producing weighted mix of routees
- * from the node metrics. The weights are typically proportional to the
- * remaining capacity.
+ * A MetricsSelector is responsible for producing weights from the node metrics.
+ * The weights are typically proportional to the remaining capacity.
  */
 abstract class MetricsSelector {
 
@@ -250,25 +251,62 @@ abstract class MetricsSelector {
   }
 
   /**
-   * Allocates a list of actor refs according to the weight of their node, i.e.
-   * weight 3 of node A will allocate 3 slots for each ref with address A.
+   * The weights per address, based on the capacity produced by
+   * the nodeMetrics.
    */
-  def weightedRefs(refs: IndexedSeq[ActorRef], selfAddress: Address, weights: Map[Address, Int]): IndexedSeq[ActorRef] = {
+  def weights(nodeMetrics: Set[NodeMetrics]): Map[Address, Int] =
+    weights(capacity(nodeMetrics))
+
+}
+
+/**
+ * INTERNAL API
+ *
+ * Pick routee based on its weight. Higher weight, higher probability.
+ */
+private[cluster] class WeightedRoutees(refs: IndexedSeq[ActorRef], selfAddress: Address, weights: Map[Address, Int]) {
+
+  // fill an array of same size as the refs with accumulated weights,
+  // binarySearch is used to pick the right bucket from a requested value
+  // from 1 to the total sum of the used weights.
+  private val buckets: Array[Int] = {
     def fullAddress(actorRef: ActorRef): Address = actorRef.path.address match {
       case Address(_, _, None, None) ⇒ selfAddress
       case a                         ⇒ a
     }
-
+    val buckets = Array.ofDim[Int](refs.size)
     val w = weights.withDefaultValue(1)
-    refs.foldLeft(IndexedSeq.empty[ActorRef]) { (acc, ref) ⇒
-      acc ++ IndexedSeq.fill(w(fullAddress(ref)))(ref)
+    var sum = 0
+    refs.zipWithIndex foreach {
+      case (ref, i) ⇒
+        sum += w(fullAddress(ref))
+        buckets(i) = sum
     }
+    buckets
   }
 
+  def total: Int =
+    if (buckets.length == 0) 0
+    else buckets(buckets.length - 1)
+
   /**
-   * Combines the different pieces to allocate a list of weighted actor refs
-   * based on the node metrics.
+   * Pick the routee matching a value, from 1 to total.
    */
-  def weightedRefs(refs: IndexedSeq[ActorRef], selfAddress: Address, nodeMetrics: Set[NodeMetrics]): IndexedSeq[ActorRef] =
-    weightedRefs(refs, selfAddress, weights(capacity(nodeMetrics)))
+  def apply(value: Int): ActorRef = {
+    // converts the result of Arrays.binarySearch into a index in the buckets array
+    // see documentation of Arrays.binarySearch for what it returns
+    def idx(i: Int): Int = {
+      if (i >= 0) i // exact match
+      else {
+        val j = math.abs(i + 1)
+        if (j >= buckets.length) throw new IndexOutOfBoundsException(
+          "Requested index [%s] is > max index [%s]".format(i, buckets.length))
+        else j
+      }
+    }
+
+    require(1 <= value && value <= total, "value must be between [1 - %s]" format total)
+    refs(idx(Arrays.binarySearch(buckets, value)))
+
+  }
 }
